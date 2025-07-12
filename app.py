@@ -1300,7 +1300,7 @@ async def build_knowledge_graph(input_text, uploaded_file=None):
                         "real_time_visualization": GRAPH_VIZ_AVAILABLE and processing_method == "chunked",
                         "svg_files_generated": 1 + (chunk_count if processing_method == "chunked" else 0),
                         "entity_color_tracking": GRAPH_VIZ_AVAILABLE,
-                        "visualization_lineage": svg_path is not None,
+                        "visualization_lineage": False,  # Will be updated after SVG generation
                         "incremental_updates": processing_method == "chunked",
                         "neo4j_viz_metadata": neo4j_success,
                         "qdrant_viz_metadata": qdrant_success
@@ -1346,6 +1346,10 @@ async def build_knowledge_graph(input_text, uploaded_file=None):
             "visualization_engine": "networkx+matplotlib" if GRAPH_VIZ_AVAILABLE else "unavailable"
         }
         
+        # Update visualization lineage after SVG generation
+        if svg_path:
+            knowledge_graph["metadata"]["hkg_metadata"]["visualization_integration"]["visualization_lineage"] = True
+        
         # Add SVG visualization to the response
         knowledge_graph["visualization"] = final_viz_metadata
         
@@ -1364,11 +1368,10 @@ async def build_knowledge_graph(input_text, uploaded_file=None):
         }
 
 # Wrapper function for Gradio (since it doesn't support async)
-def build_knowledge_graph_sync(input_text, uploaded_file=None):
-    """Synchronous wrapper for build_knowledge_graph with SVG extraction."""
-    import asyncio
+async def build_knowledge_graph_sync(input_text, uploaded_file=None):
+    """Asynchronous wrapper for build_knowledge_graph with SVG extraction."""
     try:
-        result = asyncio.run(build_knowledge_graph(input_text, uploaded_file))
+        result = await build_knowledge_graph(input_text, uploaded_file)
         
         # Extract SVG content for separate display
         svg_content = None
@@ -1434,7 +1437,7 @@ def toggle_api_fields(provider):
     else:
         return gr.update(visible=False), gr.update(visible=False)
 
-def process_with_config_streaming(text_input, uploaded_file, provider, model, api_url, api_key):
+async def process_with_config_streaming(text_input, uploaded_file, provider, model, api_url, api_key):
     """Process with model configuration and yield progress updates."""
     model_config = {
         'provider': provider,
@@ -1612,16 +1615,16 @@ def process_with_config_streaming(text_input, uploaded_file, provider, model, ap
             if svg is not None:
                 final_svg = svg
         
-        return final_result, final_svg, final_progress
+        yield final_progress, final_result, final_svg
         
     except Exception as e:
         error_result = {
             "error": f"Error in async execution: {str(e)}",
             "knowledge_graph": None
         }
-        return error_result, None, update_progress(f"❌ Fatal error: {str(e)}")
+        yield update_progress(f"❌ Fatal error: {str(e)}"), error_result, None
 
-def process_with_config(text_input, uploaded_file, provider, model, api_url, api_key):
+async def process_with_config_async(text_input, uploaded_file, provider, model, api_url, api_key):
     """Process with model configuration."""
     global global_progress_log
     global_progress_log = []  # Clear previous log
@@ -1782,7 +1785,7 @@ def process_with_config(text_input, uploaded_file, provider, model, api_url, api
             
             return knowledge_graph, final_svg
         
-        result = asyncio.run(run_with_config())
+        result = await run_with_config()
         # Return result plus the progress log
         return result[0], result[1], "\n".join(global_progress_log)
         
@@ -1793,6 +1796,43 @@ def process_with_config(text_input, uploaded_file, provider, model, api_url, api
             "knowledge_graph": None
         }
         return error_result, None, "\n".join(global_progress_log)
+
+def process_with_config_sync(text_input, uploaded_file, provider, model, api_url, api_key):
+    """Synchronous wrapper for Gradio that properly handles async calls."""
+    import asyncio
+    import nest_asyncio
+    
+    # Enable nested event loops (important for Gradio)
+    try:
+        nest_asyncio.apply()
+    except:
+        pass  # nest_asyncio might not be available
+    
+    try:
+        # Try to get the current event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If we're in a running loop, we need to use create_task
+            import concurrent.futures
+            
+            # Create a new event loop in a thread pool
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    lambda: asyncio.run(
+                        process_with_config_async(text_input, uploaded_file, provider, model, api_url, api_key)
+                    )
+                )
+                return future.result()
+        else:
+            # We can safely use run_until_complete
+            return loop.run_until_complete(
+                process_with_config_async(text_input, uploaded_file, provider, model, api_url, api_key)
+            )
+    except RuntimeError:
+        # No event loop exists, create one
+        return asyncio.run(
+            process_with_config_async(text_input, uploaded_file, provider, model, api_url, api_key)
+        )
 
 # Create Gradio interface with custom layout
 with gr.Blocks(theme=gr.themes.Soft(), title="🧠 Knowledge Graph Builder") as demo:
@@ -1964,7 +2004,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="🧠 Knowledge Graph Builder") as 
         ],
         inputs=[text_input, file_input, provider_radio, model_dropdown, api_url_input, api_key_input],
         outputs=[json_output, viz_output, progress_output],
-        fn=process_with_config,
+        fn=process_with_config_sync,
         cache_examples=False
     )
     
@@ -2002,10 +2042,11 @@ with gr.Blocks(theme=gr.themes.Soft(), title="🧠 Knowledge Graph Builder") as 
     
     # Wire up the submit button with configuration
     submit_btn.click(
-        fn=process_with_config,
+        fn=process_with_config_sync,
         inputs=[text_input, file_input, provider_radio, model_dropdown, api_url_input, api_key_input],
         outputs=[json_output, viz_output, progress_output]
     )
+
 
 if __name__ == "__main__":
     print(f"🚀 Starting Knowledge Graph Builder with Real-Time Visualization")
