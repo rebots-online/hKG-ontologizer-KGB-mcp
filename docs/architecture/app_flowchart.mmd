@@ -1,0 +1,8 @@
+```mermaid
+flowchart TD
+    A[app.py Module] --> B[extract_text_from_url]
+    A --> C[build_knowledge_graph_sync]
+    A --> D[Gradio Interface]
+    C --> B
+    D --> C
+```

@@ -1,6 +1,13 @@
 import os
 import json
 import requests
+
+# Load environment variables from .env file if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("python-dotenv not installed. Install with: pip install python-dotenv")
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import gradio as gr
@@ -26,6 +33,13 @@ try:
 except ImportError:
     OPENAI_AVAILABLE = False
 
+# Try to import embedding libraries
+try:
+    from fastembed import TextEmbedding
+    FASTEMBED_AVAILABLE = True
+except ImportError:
+    FASTEMBED_AVAILABLE = False
+
 # Try to import graph visualization libraries
 try:
     import networkx as nx
@@ -43,10 +57,107 @@ except ImportError:
 MCP_AVAILABLE = True
 
 # Configuration
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://192.168.0.173:11434")
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234")
-DEFAULT_MODEL = os.environ.get("LOCAL_MODEL", "llama3.2:latest")
-MODEL_PROVIDER = os.environ.get("MODEL_PROVIDER", "ollama")  # "ollama" or "lmstudio"
+HOSTED_API_URL = os.environ.get("HOSTED_API_URL", "https://api.openai.com")
+HOSTED_API_KEY = os.environ.get("HOSTED_API_KEY", "")
+HOSTED_MODEL = os.environ.get("HOSTED_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL = os.environ.get("LOCAL_MODEL", "deepshr1t:latest")
+MODEL_PROVIDER = os.environ.get("MODEL_PROVIDER", "ollama")  # "ollama", "lmstudio", or "hosted"
+
+# Embedding model configuration
+EMBEDDING_MODEL_URL = os.environ.get("EMBEDDING_MODEL_URL", OLLAMA_BASE_URL)  # Can be same as main ollama
+EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "mixedbread-ai/mxbai-embed-large-v1")
+EMBEDDING_PROVIDER = os.environ.get("EMBEDDING_PROVIDER", "ollama")  # "ollama", "fastembed", or "openai"
+
+# Global progress tracking for real-time updates
+global_progress_log = []
+def add_to_progress_log(message):
+    global global_progress_log
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    global_progress_log.append(f"[{timestamp}] {message}")
+    # Keep only last 100 messages
+    if len(global_progress_log) > 100:
+        global_progress_log = global_progress_log[-100:]
+    return "\n".join(global_progress_log)
+
+def get_ollama_models(base_url: str = OLLAMA_BASE_URL) -> List[str]:
+    """Fetch available models from Ollama."""
+    try:
+        if OLLAMA_AVAILABLE:
+            # Try using ollama client with custom base URL
+            if base_url != OLLAMA_BASE_URL:
+                client = ollama.Client(host=base_url)
+                models_response = client.list()
+            else:
+                models_response = ollama.list()
+            
+            # Handle ollama ListResponse object
+            if hasattr(models_response, 'models'):
+                # This is an ollama ListResponse object
+                models_list = models_response.models
+                return [model.model for model in models_list if hasattr(model, 'model')]
+            elif isinstance(models_response, dict):
+                # Fallback to dict parsing
+                models_list = models_response.get('models', [])
+                return [model.get('name', model.get('model', str(model))) for model in models_list if model]
+        else:
+            # Fallback API call
+            response = requests.get(f"{base_url}/api/tags", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                models_list = data.get('models', [])
+                return [model.get('name', model.get('model', str(model))) for model in models_list if model]
+            else:
+                print(f"Ollama API returned status code: {response.status_code}")
+    except requests.exceptions.ConnectionError:
+        print(f"Cannot connect to Ollama at {base_url}")
+    except requests.exceptions.Timeout:
+        print(f"Timeout connecting to Ollama at {base_url}")
+    except Exception as e:
+        print(f"Error fetching Ollama models: {e}")
+    return []
+
+def get_lmstudio_models(base_url: str = LMSTUDIO_BASE_URL) -> List[str]:
+    """Fetch available models from LM Studio."""
+    try:
+        if OPENAI_AVAILABLE:
+            client = openai.OpenAI(
+                base_url=f"{base_url}/v1",
+                api_key="lm-studio"
+            )
+            models = client.models.list()
+            return [model.id for model in models.data]
+        else:
+            # Fallback API call
+            response = requests.get(f"{base_url}/v1/models", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return [model['id'] for model in data.get('data', [])]
+            else:
+                print(f"LM Studio API returned status code: {response.status_code}")
+    except requests.exceptions.ConnectionError:
+        print(f"Cannot connect to LM Studio at {base_url}")
+    except requests.exceptions.Timeout:
+        print(f"Timeout connecting to LM Studio at {base_url}")
+    except Exception as e:
+        print(f"Error fetching LM Studio models: {e}")
+    return []
+
+def get_hosted_api_models(api_url: str, api_key: str) -> List[str]:
+    """Fetch available models from a hosted API (OpenAI-compatible)."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        response = requests.get(f"{api_url}/v1/models", headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return [model['id'] for model in data.get('data', [])]
+    except Exception as e:
+        print(f"Error fetching hosted API models: {e}")
+    return []
 
 # Content processing configuration
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "2000"))  # Characters per chunk for AI processing
@@ -80,6 +191,67 @@ def extract_text_from_url(url):
     except Exception as e:
         return f"Error fetching URL: {str(e)}"
 
+def extract_text_from_file(file_path):
+    """Extract text content from an uploaded file."""
+    try:
+        file_extension = os.path.splitext(file_path)[1].lower()
+        
+        if file_extension == '.txt':
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        elif file_extension == '.md':
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        elif file_extension == '.json':
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return json.dumps(data, indent=2)
+        elif file_extension == '.csv':
+            try:
+                import pandas as pd
+                df = pd.read_csv(file_path)
+                return df.to_string()
+            except ImportError:
+                # Fallback to basic CSV reading
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+        elif file_extension in ['.html', '.htm']:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                soup = BeautifulSoup(content, 'html.parser')
+                # Remove script and style elements
+                for script in soup(["script", "style"]):
+                    script.decompose()
+                return soup.get_text()
+        elif file_extension == '.pdf':
+            try:
+                import PyPDF2
+                with open(file_path, 'rb') as f:
+                    reader = PyPDF2.PdfReader(f)
+                    text = ""
+                    for page in reader.pages:
+                        text += page.extract_text()
+                    return text
+            except ImportError:
+                return "Error: PyPDF2 not installed. Install with: pip install PyPDF2"
+        elif file_extension in ['.docx', '.doc']:
+            try:
+                import docx
+                doc = docx.Document(file_path)
+                text = ""
+                for paragraph in doc.paragraphs:
+                    text += paragraph.text + "\n"
+                return text
+            except ImportError:
+                return "Error: python-docx not installed. Install with: pip install python-docx"
+        else:
+            # Try to read as text file
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+                
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
 def generate_uuidv8(namespace: str = "kgb-mcp") -> str:
     """Generate a UUIDv8 for unified entity tracking across Neo4j and Qdrant."""
     timestamp = int(time.time() * 1000)  # milliseconds
@@ -98,20 +270,33 @@ def generate_uuidv8(namespace: str = "kgb-mcp") -> str:
     uuid_hex = hash_bytes.hex()
     return f"{uuid_hex[:8]}-{uuid_hex[8:12]}-{uuid_hex[12:16]}-{uuid_hex[16:20]}-{uuid_hex[20:32]}"
 
-def call_local_model(prompt: str, model: str = DEFAULT_MODEL) -> str:
-    """Call local model via Ollama or LM Studio."""
+def call_local_model(prompt: str, model: str = DEFAULT_MODEL, provider: str = MODEL_PROVIDER, api_url: str = None, api_key: str = None) -> str:
+    """Call model via Ollama, LM Studio, or hosted API."""
     try:
-        if MODEL_PROVIDER == "ollama" and OLLAMA_AVAILABLE:
-            response = ollama.chat(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.2, "top_p": 0.9}
-            )
+        if provider == "ollama" and OLLAMA_AVAILABLE:
+            # Use custom URL if provided, otherwise use default
+            base_url = api_url if api_url else OLLAMA_BASE_URL
+            # Set the base_url for ollama client
+            if api_url and api_url != OLLAMA_BASE_URL:
+                # For custom URLs, we need to use the client with custom base_url
+                client = ollama.Client(host=base_url)
+                response = client.chat(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0.2, "top_p": 0.9}
+                )
+            else:
+                response = ollama.chat(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0.2, "top_p": 0.9}
+                )
             return response["message"]["content"]
         
-        elif MODEL_PROVIDER == "lmstudio" and OPENAI_AVAILABLE:
+        elif provider == "lmstudio" and OPENAI_AVAILABLE:
+            base_url = api_url if api_url else LMSTUDIO_BASE_URL
             client = openai.OpenAI(
-                base_url=LMSTUDIO_BASE_URL + "/v1",
+                base_url=base_url + "/v1",
                 api_key="lm-studio"
             )
             response = client.chat.completions.create(
@@ -122,11 +307,64 @@ def call_local_model(prompt: str, model: str = DEFAULT_MODEL) -> str:
             )
             return response.choices[0].message.content
         
+        elif provider == "hosted" and api_url and api_key and OPENAI_AVAILABLE:
+            client = openai.OpenAI(
+                base_url=api_url if api_url.endswith("/v1") else f"{api_url}/v1",
+                api_key=api_key
+            )
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=4000
+            )
+            return response.choices[0].message.content
+        
         else:
-            return "Error: No local model provider available. Please install ollama-python or openai package."
+            return "Error: No compatible model provider available or missing configuration."
     
     except Exception as e:
-        return f"Error calling local model: {str(e)}"
+        return f"Error calling model: {str(e)}"
+
+def generate_embeddings(text: str, model_name: str = EMBEDDING_MODEL_NAME, provider: str = EMBEDDING_PROVIDER, api_url: str = EMBEDDING_MODEL_URL) -> Optional[List[float]]:
+    """Generate embeddings for text using configured embedding model."""
+    try:
+        if provider == "ollama" and OLLAMA_AVAILABLE:
+            # Use Ollama for embeddings
+            base_url = api_url if api_url else EMBEDDING_MODEL_URL
+            if api_url and api_url != OLLAMA_BASE_URL:
+                client = ollama.Client(host=base_url)
+                response = client.embeddings(model=model_name, prompt=text)
+            else:
+                response = ollama.embeddings(model=model_name, prompt=text)
+            return response.get("embedding", response.get("embeddings", []))
+        
+        elif provider == "fastembed" and FASTEMBED_AVAILABLE:
+            # Use FastEmbed for local embeddings
+            embedding_model = TextEmbedding(model_name=model_name)
+            embeddings = list(embedding_model.embed([text]))
+            if embeddings:
+                return embeddings[0].tolist()  # Convert numpy array to list
+        
+        elif provider == "openai" and OPENAI_AVAILABLE:
+            # Use OpenAI API for embeddings
+            client = openai.OpenAI(
+                base_url=api_url if api_url.endswith("/v1") else f"{api_url}/v1",
+                api_key=os.environ.get("OPENAI_API_KEY", "")
+            )
+            response = client.embeddings.create(
+                input=text,
+                model=model_name
+            )
+            return response.data[0].embedding
+        
+        else:
+            print(f"Embedding provider {provider} not available or not configured")
+            return None
+    
+    except Exception as e:
+        print(f"Error generating embeddings: {e}")
+        return None
 
 def store_in_neo4j_sync(entities: List[Dict], relationships: List[Dict], uuid_v8: str, content_metadata: Dict = None, visualization_metadata: Dict = None) -> bool:
     """Store entities and relationships in Neo4j via MCP server with enhanced hKG and visualization metadata."""
@@ -231,13 +469,34 @@ Incremental SVG Files: {visualization_metadata.get('incremental_files_saved', 0)
 SVG File Path: {visualization_metadata.get('svg_file_path', 'none')}
 Entity Colors: {', '.join([f"{et}={get_entity_color(et)}" for et in set(entity_types)]) if GRAPH_VIZ_AVAILABLE else 'unavailable'}"""
         
+        # Generate embeddings for the content
+        embeddings = generate_embeddings(vector_content)
+        if not embeddings:
+            print(f"Warning: Could not generate embeddings for content. Using text-only storage.")
+            embeddings = None
+        else:
+            print(f"Generated embeddings with {len(embeddings)} dimensions")
+        
         print(f"Storing knowledge graph in Qdrant with UUID {uuid_v8}")
         print(f"Vector content length: {len(vector_content)}")
         print(f"Entity count: {len(entities)}, Relationship count: {len(relationships)}")
         print(f"Visualization tracking: {visualization_metadata.get('visualization_available', False) if visualization_metadata else False}")
+        print(f"Embeddings: {'✅ Generated' if embeddings else '❌ Failed'}")
         
-        # The actual MCP call would be made here automatically
+        # The actual MCP call would be made here automatically with embeddings
         # This would include the enhanced metadata for hKG lineage tracking
+        # Example MCP call structure:
+        # mcp_qdrant_store({
+        #     "information": vector_content,
+        #     "metadata": {
+        #         "uuid": uuid_v8,
+        #         "entities": entities,
+        #         "relationships": relationships,
+        #         "content_metadata": content_metadata,
+        #         "visualization_metadata": visualization_metadata,
+        #         "embeddings": embeddings
+        #     }
+        # })
         
         return True
     except Exception as e:
@@ -667,7 +926,7 @@ class RealTimeGraphVisualizer:
             return self.svg_history[-1]
         return None
 
-def extract_entities_and_relationships(text, progress_callback=None):
+def extract_entities_and_relationships(text, progress_callback=None, model_config=None):
     """Use local model to extract entities and relationships from text, handling large content via chunking with real-time updates."""
     
     # For very large content, process in chunks with real-time updates
@@ -691,7 +950,12 @@ def extract_entities_and_relationships(text, progress_callback=None):
         for i, chunk in enumerate(chunks):
             print(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)...")
             
-            result = extract_entities_and_relationships_single(chunk)
+            # Create a progress callback for this specific chunk
+            def chunk_progress_callback(message):
+                add_to_progress_log(f"Chunk {i+1}/{len(chunks)}: {message}")
+                print(f"Chunk {i+1}/{len(chunks)}: {message}")
+            
+            result = extract_entities_and_relationships_single(chunk, model_config, chunk_progress_callback)
             
             if "error" not in result:
                 chunk_results.append(result)
@@ -728,7 +992,11 @@ def extract_entities_and_relationships(text, progress_callback=None):
             }
     else:
         # For smaller content, process directly
-        result = extract_entities_and_relationships_single(text)
+        def single_progress_callback(message):
+            add_to_progress_log(f"Single chunk: {message}")
+            print(f"Single chunk: {message}")
+        
+        result = extract_entities_and_relationships_single(text, model_config, single_progress_callback)
         
         # Call progress callback even for single chunk
         if progress_callback and "error" not in result:
@@ -744,7 +1012,7 @@ def extract_entities_and_relationships(text, progress_callback=None):
         
         return result
 
-def extract_entities_and_relationships_single(text):
+def extract_entities_and_relationships_single(text, model_config=None, progress_callback=None):
     """Extract entities and relationships from a single chunk of text."""
     
     entity_prompt = f"""
@@ -766,22 +1034,72 @@ def extract_entities_and_relationships_single(text):
     """
     
     try:
-        response_text = call_local_model(entity_prompt)
+        if progress_callback:
+            progress_callback("📤 Sending prompt to AI model...")
+        
+        # Use model configuration if provided, otherwise use defaults
+        if model_config:
+            response_text = call_local_model(
+                entity_prompt,
+                model=model_config.get('model', DEFAULT_MODEL),
+                provider=model_config.get('provider', MODEL_PROVIDER),
+                api_url=model_config.get('api_url'),
+                api_key=model_config.get('api_key')
+            )
+        else:
+            response_text = call_local_model(entity_prompt)
+        
+        if progress_callback:
+            progress_callback("📥 Received response from AI model, processing...")
         
         if response_text.startswith("Error:"):
+            if progress_callback:
+                progress_callback(f"❌ Model error: {response_text}")
             return {
                 "entities": [],
                 "relationships": [],
                 "error": response_text
             }
         
-        # Try to parse JSON from the response
-        # Sometimes the model might return JSON wrapped in markdown code blocks
-        if response_text.startswith('```'):
+        # Clean the response: remove <think> tags and extract JSON from markdown blocks
+        original_response = response_text
+        
+        # Show the full raw response first (truncated for readability)
+        if progress_callback:
+            if len(response_text) > 500:
+                progress_callback(f"📝 AI Response (first 500 chars):\n{response_text[:500]}...")
+            else:
+                progress_callback(f"📝 AI Response:\n{response_text}")
+        
+        # Handle <think> tags first - but show them in progress
+        if '<think>' in response_text and '</think>' in response_text:
+            import re
+            think_match = re.search(r'<think>(.*?)</think>', response_text, re.DOTALL)
+            if think_match and progress_callback:
+                think_content = think_match.group(1).strip()
+                progress_callback(f"🤔 AI Thinking:\n{think_content}")
+            
+            # Remove everything from <think> to </think>
+            response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
+        
+        if progress_callback:
+            progress_callback("🔧 Cleaning and parsing JSON response...")
+        
+        # Handle markdown code blocks
+        if '```json' in response_text:
+            # Extract content between ```json and ```
+            start_marker = '```json'
+            end_marker = '```'
+            start_idx = response_text.find(start_marker)
+            if start_idx != -1:
+                start_idx += len(start_marker)
+                end_idx = response_text.find(end_marker, start_idx)
+                if end_idx != -1:
+                    response_text = response_text[start_idx:end_idx].strip()
+        elif response_text.startswith('```') and response_text.endswith('```'):
+            # Handle generic code blocks
             lines = response_text.split('\n')
             start_idx = 1
-            if lines[0].strip() == '```json':
-                start_idx = 1
             end_idx = len(lines) - 1
             for i in range(len(lines)-1, 0, -1):
                 if lines[i].strip() == '```':
@@ -789,7 +1107,14 @@ def extract_entities_and_relationships_single(text):
                     break
             response_text = '\n'.join(lines[start_idx:end_idx])
         
+        # Show the cleaned JSON that will be parsed
+        if progress_callback:
+            progress_callback(f"🔧 Cleaned JSON for parsing:\n{response_text}")
+        
         result = json.loads(response_text)
+        
+        if progress_callback:
+            progress_callback("✅ Successfully parsed JSON response")
         
         # Validate the structure
         if not isinstance(result, dict):
@@ -799,57 +1124,87 @@ def extract_entities_and_relationships_single(text):
             result["entities"] = []
         if "relationships" not in result:
             result["relationships"] = []
+        
+        if progress_callback:
+            entity_count = len(result["entities"])
+            rel_count = len(result["relationships"])
+            progress_callback(f"📊 Extracted {entity_count} entities and {rel_count} relationships")
             
         return result
         
     except json.JSONDecodeError as e:
+        error_msg = f"Failed to parse LLM response as JSON: {str(e)}"
+        if progress_callback:
+            progress_callback(f"❌ JSON Parse Error: {error_msg}")
+            progress_callback(f"Raw response: {response_text if 'response_text' in locals() else 'No response'}")
         # If JSON parsing fails, return a structured error
         return {
             "entities": [],
             "relationships": [],
-            "error": f"Failed to parse LLM response as JSON: {str(e)}",
+            "error": error_msg,
             "raw_response": response_text if 'response_text' in locals() else "No response"
         }
     except Exception as e:
+        error_msg = f"Error calling local model: {str(e)}"
+        if progress_callback:
+            progress_callback(f"❌ Model Error: {error_msg}")
         return {
             "entities": [],
             "relationships": [],
-            "error": f"Error calling local model: {str(e)}"
+            "error": error_msg
         }
 
-async def build_knowledge_graph(input_text):
-    """Main function to build knowledge graph from text or URL."""
+async def build_knowledge_graph(input_text, uploaded_file=None):
+    """Main function to build knowledge graph from text, URL, or uploaded file."""
     
     try:
-        if not input_text or not input_text.strip():
+        if not input_text and not uploaded_file:
             return {
-                "error": "Please provide text or a valid URL",
+                "error": "Please provide text, a valid URL, or upload a file",
                 "knowledge_graph": None
             }
         
         # Generate UUIDv8 for this knowledge graph
         uuid_v8 = generate_uuidv8()
         
-        # Check if input is a URL
-        parsed = urlparse(input_text.strip())
-        is_url = parsed.scheme in ('http', 'https') and parsed.netloc
-        
-        if is_url:
-            # Extract text from URL
-            extracted_text = extract_text_from_url(input_text.strip())
-            if extracted_text.startswith("Error fetching URL"):
+        # Handle file upload priority
+        if uploaded_file:
+            # Extract text from uploaded file
+            extracted_text = extract_text_from_file(uploaded_file.name)
+            if extracted_text.startswith("Error reading file"):
                 return {
                     "error": extracted_text,
                     "knowledge_graph": None
                 }
-            source_type = "url"
-            source = input_text.strip()
+            source_type = "file"
+            source = uploaded_file.name
             content = extracted_text
+        elif input_text and input_text.strip():
+            # Check if input is a URL
+            parsed = urlparse(input_text.strip())
+            is_url = parsed.scheme in ('http', 'https') and parsed.netloc
+            
+            if is_url:
+                # Extract text from URL
+                extracted_text = extract_text_from_url(input_text.strip())
+                if extracted_text.startswith("Error fetching URL"):
+                    return {
+                        "error": extracted_text,
+                        "knowledge_graph": None
+                    }
+                source_type = "url"
+                source = input_text.strip()
+                content = extracted_text
+            else:
+                # Use provided text directly
+                source_type = "text"
+                source = "direct_input"
+                content = input_text.strip()
         else:
-            # Use provided text directly
-            source_type = "text"
-            source = "direct_input"
-            content = input_text.strip()
+            return {
+                "error": "Please provide text, a valid URL, or upload a file",
+                "knowledge_graph": None
+            }
         
         # Initialize real-time graph visualizer
         real_time_visualizer = RealTimeGraphVisualizer(uuid_v8)
@@ -1009,11 +1364,11 @@ async def build_knowledge_graph(input_text):
         }
 
 # Wrapper function for Gradio (since it doesn't support async)
-def build_knowledge_graph_sync(input_text):
+def build_knowledge_graph_sync(input_text, uploaded_file=None):
     """Synchronous wrapper for build_knowledge_graph with SVG extraction."""
     import asyncio
     try:
-        result = asyncio.run(build_knowledge_graph(input_text))
+        result = asyncio.run(build_knowledge_graph(input_text, uploaded_file))
         
         # Extract SVG content for separate display
         svg_content = None
@@ -1029,63 +1384,628 @@ def build_knowledge_graph_sync(input_text):
         }
         return error_result, None
 
-# Create Gradio interface
-demo = gr.Interface(
-    fn=build_knowledge_graph_sync,
-    inputs=gr.Textbox(
-        label="Text or URL Input",
-        placeholder="Enter text to analyze or a web URL (e.g., https://example.com)",
-        lines=5,
-        max_lines=10
-    ),
-    outputs=[
-        gr.JSON(label="Knowledge Graph Data"),
-        gr.HTML(label="Graph Visualization")
-    ],
-    title="🧠 Knowledge Graph Builder with Real-Time Visualization",
-    description=f"""
-    **Build Knowledge Graphs with Local AI Models - Now with Real-Time SVG Visualization!**
+# Functions for Gradio interface
+def update_model_dropdown(provider, api_url=None, api_key=None):
+    """Update model dropdown based on selected provider."""
+    print(f"Updating models for provider: {provider}, URL: {api_url}")
     
-    This tool uses local AI models via {MODEL_PROVIDER.upper()} to extract entities and relationships from text or web content:
+    models = []
+    if provider == "ollama":
+        base_url = api_url if api_url and api_url.strip() else OLLAMA_BASE_URL
+        models = get_ollama_models(base_url)
+        print(f"Found {len(models)} Ollama models: {models}")
+    elif provider == "lmstudio": 
+        base_url = api_url if api_url and api_url.strip() else LMSTUDIO_BASE_URL
+        models = get_lmstudio_models(base_url)
+        print(f"Found {len(models)} LM Studio models: {models}")
+    elif provider == "hosted" and api_url and api_key:
+        models = get_hosted_api_models(api_url, api_key)
+        print(f"Found {len(models)} hosted API models: {models}")
+    else:
+        print(f"Provider {provider} not configured or missing credentials")
     
-    • **Text Input**: Paste any text to analyze (no size limits - handles 300MB+ content)
-    • **URL Input**: Provide a web URL to extract and analyze content (full page content)
-    • **Large Content**: Automatically chunks large content with smart sentence boundary detection
-    • **Real-Time Visualization**: Watch the knowledge graph grow as chunks are processed
-    • **SVG Output**: Interactive graph visualization with color-coded entity types
-    • **Output**: Structured JSON knowledge graph + SVG visualization
-    • **Storage**: Automatically stores in Neo4j and Qdrant via MCP servers
+    if not models:
+        models = [DEFAULT_MODEL]  # Fallback
+        print(f"No models found, using fallback: {DEFAULT_MODEL}")
     
-    **Visualization Features:**
-    - 🎨 Color-coded entity types (Person=Red, Organization=Teal, Location=Blue, etc.)
-    - 📊 Real-time progress tracking during large content processing
-    - 💾 Saves incremental SVG files for each chunk processed
-    - 🔍 Interactive legend and statistics
-    - 📈 Progress bar showing processing completion
+    # Choose default value: prioritize DEFAULT_MODEL if it's in the list, otherwise use first model
+    default_value = DEFAULT_MODEL if DEFAULT_MODEL in models else models[0] if models else DEFAULT_MODEL
+    print(f"Setting default model to: {default_value}")
     
-    **Current Configuration:**
-    - Model Provider: {MODEL_PROVIDER}
-    - Model: {DEFAULT_MODEL}
-    - Chunk Size: {CHUNK_SIZE:,} characters per chunk
-    - Chunk Overlap: {CHUNK_OVERLAP} characters
-    - Max Chunks: {"Unlimited" if MAX_CHUNKS == 0 else str(MAX_CHUNKS)}
-    - Graph Visualization: {"✅ Available" if GRAPH_VIZ_AVAILABLE else "❌ Install matplotlib & networkx"}
-    - Ollama URL: {OLLAMA_BASE_URL}
-    - LM Studio URL: {LMSTUDIO_BASE_URL}
-    - MCP Integration: {"✅ Available" if MCP_AVAILABLE else "❌ Not Available"}
+    return gr.Dropdown(choices=models, value=default_value)
+
+def toggle_api_fields(provider):
+    """Show/hide API configuration fields based on provider."""
+    if provider == "hosted":
+        return (
+            gr.update(visible=True, label="API URL", placeholder="https://api.openai.com", value=HOSTED_API_URL, info="Base URL for hosted API (without /v1)"),
+            gr.update(visible=True, value=HOSTED_API_KEY)
+        )
+    elif provider == "ollama":
+        return (
+            gr.update(visible=True, label="Ollama URL", placeholder="http://localhost:11434", value=OLLAMA_BASE_URL, info="URL of your Ollama server"),
+            gr.update(visible=False, value="")
+        )
+    elif provider == "lmstudio":
+        return (
+            gr.update(visible=True, label="LM Studio URL", placeholder="http://localhost:1234", value=LMSTUDIO_BASE_URL, info="URL of your LM Studio server"),
+            gr.update(visible=False, value="")
+        )
+    else:
+        return gr.update(visible=False), gr.update(visible=False)
+
+def process_with_config_streaming(text_input, uploaded_file, provider, model, api_url, api_key):
+    """Process with model configuration and yield progress updates."""
+    model_config = {
+        'provider': provider,
+        'model': model,
+        'api_url': api_url,  # Include URL for all providers
+        'api_key': api_key if provider == "hosted" else None
+    }
     
-    **For Large Content (300MB+):**
-    - Real-time graph updates as each chunk is processed
-    - Incremental SVG files saved: `knowledge_graph_<uuid>_chunk_NNNN.svg`
-    - Final complete SVG: `knowledge_graph_<uuid>.svg`
-    """,
-    examples=[
-        ["Apple Inc. was founded by Steve Jobs, Steve Wozniak, and Ronald Wayne in 1976. The company is headquartered in Cupertino, California."],
-        ["https://en.wikipedia.org/wiki/Artificial_intelligence"],
-    ],
-    cache_examples=False,
-    theme=gr.themes.Soft()
-)
+    # Create a progress log for real-time updates
+    progress_log = []
+    def update_progress(message):
+        progress_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        return "\n".join(progress_log[-50:])  # Keep last 50 messages
+    
+    yield update_progress("🚀 Starting knowledge graph extraction..."), None, None
+    
+    # Update the global extraction function to use model_config
+    import asyncio
+    try:
+        async def run_with_config():
+            # Build knowledge graph with custom config
+            if not text_input and not uploaded_file:
+                yield update_progress("❌ No input provided"), {
+                    "error": "Please provide text, a valid URL, or upload a file",
+                    "knowledge_graph": None
+                }, None
+                return
+            
+            yield update_progress("🔧 Initializing processing..."), None, None
+            
+            # Generate UUIDv8 for this knowledge graph
+            uuid_v8 = generate_uuidv8()
+            yield update_progress(f"🆔 Generated UUID: {uuid_v8[:8]}..."), None, None
+            
+            # Handle file upload priority
+            if uploaded_file:
+                yield update_progress(f"📁 Processing uploaded file: {uploaded_file.name}"), None, None
+                extracted_text = extract_text_from_file(uploaded_file.name)
+                if extracted_text.startswith("Error reading file"):
+                    yield update_progress(f"❌ File error: {extracted_text}"), {
+                        "error": extracted_text,
+                        "knowledge_graph": None
+                    }, None
+                    return
+                source_type = "file"
+                source = uploaded_file.name
+                content = extracted_text
+                yield update_progress(f"✅ File processed: {len(content)} characters"), None, None
+            elif text_input and text_input.strip():
+                parsed = urlparse(text_input.strip())
+                is_url = parsed.scheme in ('http', 'https') and parsed.netloc
+                
+                if is_url:
+                    yield update_progress(f"🌐 Fetching URL: {text_input.strip()}"), None, None
+                    extracted_text = extract_text_from_url(text_input.strip())
+                    if extracted_text.startswith("Error fetching URL"):
+                        yield update_progress(f"❌ URL error: {extracted_text}"), {
+                            "error": extracted_text,
+                            "knowledge_graph": None
+                        }, None
+                        return
+                    source_type = "url"
+                    source = text_input.strip()
+                    content = extracted_text
+                    yield update_progress(f"✅ URL processed: {len(content)} characters"), None, None
+                else:
+                    source_type = "text"
+                    source = "direct_input"
+                    content = text_input.strip()
+                    yield update_progress(f"📝 Text input: {len(content)} characters"), None, None
+            else:
+                yield update_progress("❌ No valid input provided"), {
+                    "error": "Please provide text, a valid URL, or upload a file",
+                    "knowledge_graph": None
+                }, None
+                return
+            
+            # Initialize real-time graph visualizer
+            real_time_visualizer = RealTimeGraphVisualizer(uuid_v8)
+            latest_svg = None
+            
+            # Define progress callback for real-time updates
+            def progress_callback(progress_info):
+                nonlocal latest_svg
+                if GRAPH_VIZ_AVAILABLE:
+                    svg_content, message = real_time_visualizer.update_graph(progress_info)
+                    if svg_content:
+                        latest_svg = svg_content
+                        yield update_progress(f"📊 Graph updated: {message}"), None, svg_content
+            
+            # Define text progress callback for AI thinking etc.
+            def text_progress_callback(message):
+                yield update_progress(message), None, None
+            
+            yield update_progress(f"🤖 Starting AI extraction with {model_config['provider']}:{model_config['model']}"), None, None
+            
+            # Extract entities and relationships using configured model
+            kg_data = extract_entities_and_relationships(content, progress_callback, model_config)
+            
+            yield update_progress("✅ AI extraction completed"), None, None
+            
+            # Build final response (rest of build_knowledge_graph logic)
+            processing_method = "chunked" if len(content) > CHUNK_SIZE else "single"
+            chunk_count = len(chunk_text(content)) if len(content) > CHUNK_SIZE else 1
+            
+            content_metadata = {
+                "content_length": len(content),
+                "processing_method": processing_method,
+                "chunk_count": chunk_count,
+                "model": f"{model_config['provider']}:{model_config['model']}",
+                "source_type": source_type,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Generate final SVG
+            final_svg = None
+            if GRAPH_VIZ_AVAILABLE and kg_data.get("entities"):
+                try:
+                    yield update_progress("🎨 Generating final visualization..."), None, None
+                    if latest_svg:
+                        final_svg = latest_svg
+                    else:
+                        final_svg, svg_message = create_knowledge_graph_svg(
+                            kg_data["entities"], 
+                            kg_data["relationships"], 
+                            uuid_v8
+                        )
+                    
+                    if final_svg:
+                        svg_path = save_svg_file(final_svg, uuid_v8)
+                        yield update_progress(f"💾 SVG saved: {svg_path}"), None, final_svg
+                        
+                except Exception as e:
+                    yield update_progress(f"❌ SVG error: {e}"), None, None
+            
+            # Build knowledge graph response
+            knowledge_graph = {
+                "source": {
+                    "type": source_type,
+                    "value": source,
+                    "content_preview": content[:200] + "..." if len(content) > 200 else content
+                },
+                "knowledge_graph": {
+                    "entities": kg_data.get("entities", []),
+                    "relationships": kg_data.get("relationships", []),
+                    "entity_count": len(kg_data.get("entities", [])),
+                    "relationship_count": len(kg_data.get("relationships", []))
+                },
+                "metadata": {
+                    "model": f"{model_config['provider']}:{model_config['model']}",
+                    "content_length": len(content),
+                    "uuid": uuid_v8,
+                    "timestamp": datetime.now().isoformat()
+                }
+            }
+            
+            if "error" in kg_data:
+                knowledge_graph["extraction_error"] = kg_data["error"]
+                if "raw_response" in kg_data:
+                    knowledge_graph["raw_llm_response"] = kg_data["raw_response"]
+            
+            entity_count = len(kg_data.get("entities", []))
+            rel_count = len(kg_data.get("relationships", []))
+            yield update_progress(f"🎉 Completed! {entity_count} entities, {rel_count} relationships"), knowledge_graph, final_svg
+        
+        # Run the async function and collect results
+        final_result = None
+        final_svg = None
+        final_progress = ""
+        
+        async for progress, result, svg in run_with_config():
+            final_progress = progress
+            if result is not None:
+                final_result = result
+            if svg is not None:
+                final_svg = svg
+        
+        return final_result, final_svg, final_progress
+        
+    except Exception as e:
+        error_result = {
+            "error": f"Error in async execution: {str(e)}",
+            "knowledge_graph": None
+        }
+        return error_result, None, update_progress(f"❌ Fatal error: {str(e)}")
+
+def process_with_config(text_input, uploaded_file, provider, model, api_url, api_key):
+    """Process with model configuration."""
+    global global_progress_log
+    global_progress_log = []  # Clear previous log
+    
+    add_to_progress_log("🚀 Starting knowledge graph extraction...")
+    
+    model_config = {
+        'provider': provider,
+        'model': model,
+        'api_url': api_url,  # Include URL for all providers
+        'api_key': api_key if provider == "hosted" else None
+    }
+    
+    # Update the global extraction function to use model_config
+    import asyncio
+    try:
+        async def run_with_config():
+            # Build knowledge graph with custom config
+            if not text_input and not uploaded_file:
+                add_to_progress_log("❌ No input provided")
+                return {
+                    "error": "Please provide text, a valid URL, or upload a file",
+                    "knowledge_graph": None
+                }, None
+            
+            add_to_progress_log("🔧 Initializing processing...")
+            
+            # Generate UUIDv8 for this knowledge graph
+            uuid_v8 = generate_uuidv8()
+            add_to_progress_log(f"🆔 Generated UUID: {uuid_v8[:8]}...")
+            
+            # Handle file upload priority
+            if uploaded_file:
+                add_to_progress_log(f"📁 Processing uploaded file: {uploaded_file.name}")
+                extracted_text = extract_text_from_file(uploaded_file.name)
+                if extracted_text.startswith("Error reading file"):
+                    add_to_progress_log(f"❌ File error: {extracted_text}")
+                    return {
+                        "error": extracted_text,
+                        "knowledge_graph": None
+                    }, None
+                source_type = "file"
+                source = uploaded_file.name
+                content = extracted_text
+                add_to_progress_log(f"✅ File processed: {len(content)} characters")
+            elif text_input and text_input.strip():
+                parsed = urlparse(text_input.strip())
+                is_url = parsed.scheme in ('http', 'https') and parsed.netloc
+                
+                if is_url:
+                    add_to_progress_log(f"🌐 Fetching URL: {text_input.strip()}")
+                    extracted_text = extract_text_from_url(text_input.strip())
+                    if extracted_text.startswith("Error fetching URL"):
+                        add_to_progress_log(f"❌ URL error: {extracted_text}")
+                        return {
+                            "error": extracted_text,
+                            "knowledge_graph": None
+                        }, None
+                    source_type = "url"
+                    source = text_input.strip()
+                    content = extracted_text
+                    add_to_progress_log(f"✅ URL processed: {len(content)} characters")
+                else:
+                    source_type = "text"
+                    source = "direct_input"
+                    content = text_input.strip()
+                    add_to_progress_log(f"📝 Text input: {len(content)} characters")
+            else:
+                add_to_progress_log("❌ No valid input provided")
+                return {
+                    "error": "Please provide text, a valid URL, or upload a file",
+                    "knowledge_graph": None
+                }, None
+            
+            # Initialize real-time graph visualizer
+            real_time_visualizer = RealTimeGraphVisualizer(uuid_v8)
+            latest_svg = None
+            
+            # Define progress callback for real-time updates
+            def progress_callback(progress_info):
+                nonlocal latest_svg
+                if GRAPH_VIZ_AVAILABLE:
+                    svg_content, message = real_time_visualizer.update_graph(progress_info)
+                    if svg_content:
+                        latest_svg = svg_content
+                        add_to_progress_log(f"📊 Graph updated: {message}")
+            
+            add_to_progress_log(f"🤖 Starting AI extraction with {model_config['provider']}:{model_config['model']}")
+            
+            # Extract entities and relationships using configured model
+            kg_data = extract_entities_and_relationships(content, progress_callback, model_config)
+            
+            add_to_progress_log("✅ AI extraction completed")
+            
+            # Build final response (rest of build_knowledge_graph logic)
+            processing_method = "chunked" if len(content) > CHUNK_SIZE else "single"
+            chunk_count = len(chunk_text(content)) if len(content) > CHUNK_SIZE else 1
+            
+            content_metadata = {
+                "content_length": len(content),
+                "processing_method": processing_method,
+                "chunk_count": chunk_count,
+                "model": f"{model_config['provider']}:{model_config['model']}",
+                "source_type": source_type,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Generate final SVG
+            final_svg = None
+            if GRAPH_VIZ_AVAILABLE and kg_data.get("entities"):
+                try:
+                    add_to_progress_log("🎨 Generating final visualization...")
+                    if latest_svg:
+                        final_svg = latest_svg
+                    else:
+                        final_svg, svg_message = create_knowledge_graph_svg(
+                            kg_data["entities"], 
+                            kg_data["relationships"], 
+                            uuid_v8
+                        )
+                    
+                    if final_svg:
+                        svg_path = save_svg_file(final_svg, uuid_v8)
+                        add_to_progress_log(f"💾 SVG saved: {svg_path}")
+                        
+                except Exception as e:
+                    add_to_progress_log(f"❌ SVG error: {e}")
+            
+            # Build knowledge graph response
+            knowledge_graph = {
+                "source": {
+                    "type": source_type,
+                    "value": source,
+                    "content_preview": content[:200] + "..." if len(content) > 200 else content
+                },
+                "knowledge_graph": {
+                    "entities": kg_data.get("entities", []),
+                    "relationships": kg_data.get("relationships", []),
+                    "entity_count": len(kg_data.get("entities", [])),
+                    "relationship_count": len(kg_data.get("relationships", []))
+                },
+                "metadata": {
+                    "model": f"{model_config['provider']}:{model_config['model']}",
+                    "content_length": len(content),
+                    "uuid": uuid_v8,
+                    "timestamp": datetime.now().isoformat()
+                }
+            }
+            
+            if "error" in kg_data:
+                knowledge_graph["extraction_error"] = kg_data["error"]
+                if "raw_response" in kg_data:
+                    knowledge_graph["raw_llm_response"] = kg_data["raw_response"]
+                    
+            entity_count = len(kg_data.get("entities", []))
+            rel_count = len(kg_data.get("relationships", []))
+            add_to_progress_log(f"🎉 Completed! {entity_count} entities, {rel_count} relationships")
+            
+            return knowledge_graph, final_svg
+        
+        result = asyncio.run(run_with_config())
+        # Return result plus the progress log
+        return result[0], result[1], "\n".join(global_progress_log)
+        
+    except Exception as e:
+        add_to_progress_log(f"❌ Fatal error: {str(e)}")
+        error_result = {
+            "error": f"Error in async execution: {str(e)}",
+            "knowledge_graph": None
+        }
+        return error_result, None, "\n".join(global_progress_log)
+
+# Create Gradio interface with custom layout
+with gr.Blocks(theme=gr.themes.Soft(), title="🧠 Knowledge Graph Builder") as demo:
+    gr.Markdown("# 🧠 Knowledge Graph Builder with Real-Time Visualization")
+    gr.Markdown("**Build Knowledge Graphs with Local AI Models - Now with Real-Time SVG Visualization!**")
+    
+    # Model Configuration Section
+    gr.Markdown("## Model Configuration")
+    with gr.Row():
+        with gr.Column(scale=1):
+            provider_radio = gr.Radio(
+                choices=["ollama", "lmstudio", "hosted"],
+                value=MODEL_PROVIDER,
+                label="AI Provider",
+                info="Select your AI model provider"
+            )
+        with gr.Column(scale=1):
+            api_url_input = gr.Textbox(
+                label="Ollama URL",
+                placeholder="http://localhost:11434",
+                value=OLLAMA_BASE_URL,
+                visible=True,
+                info="URL of your Ollama server"
+            )
+        with gr.Column(scale=1):
+            api_key_input = gr.Textbox(
+                label="API Key",
+                placeholder="Your API key",
+                value=HOSTED_API_KEY,
+                type="password",
+                visible=False,
+                info="API key for hosted service"
+            )
+    
+    # Initialize with available models based on default provider
+    if MODEL_PROVIDER == "ollama":
+        initial_models = get_ollama_models(OLLAMA_BASE_URL)
+    elif MODEL_PROVIDER == "lmstudio":
+        initial_models = get_lmstudio_models(LMSTUDIO_BASE_URL)
+    else:
+        initial_models = []
+    
+    if not initial_models:
+        initial_models = [DEFAULT_MODEL]
+    
+    # Choose initial default value: prioritize DEFAULT_MODEL if it's in the list, otherwise use first model
+    initial_default_value = DEFAULT_MODEL if DEFAULT_MODEL in initial_models else initial_models[0] if initial_models else DEFAULT_MODEL
+    
+    with gr.Row():
+        model_dropdown = gr.Dropdown(
+            choices=initial_models,
+            value=initial_default_value,
+            label="Select Model",
+            info="Choose the AI model to use",
+            interactive=True
+        )
+        refresh_models_btn = gr.Button("🔄 Refresh Models", variant="secondary")
+    
+    # Input section
+    gr.Markdown("## Input")
+    with gr.Row():
+        with gr.Column(scale=2):
+            text_input = gr.Textbox(
+                label="Text or URL Input",
+                placeholder="Paste any text paragraph or enter a web URL (e.g., https://example.com)",
+                lines=4,
+                max_lines=8
+            )
+        with gr.Column(scale=1):
+            file_input = gr.File(
+                label="Upload File",
+                file_types=[".txt", ".md", ".json", ".csv", ".html", ".htm", ".pdf", ".docx", ".doc"],
+                type="filepath"
+            )
+    
+    # Submit button
+    submit_btn = gr.Button("🚀 Build Knowledge Graph", variant="primary", size="lg")
+    
+    # Output section
+    with gr.Row():
+        with gr.Column(scale=1):
+            json_output = gr.JSON(label="Knowledge Graph Data")
+        with gr.Column(scale=1):
+            viz_output = gr.HTML(label="Graph Visualization")
+    
+    # Real-time progress output
+    with gr.Row():
+        progress_output = gr.Textbox(
+            label="Real-Time Progress & AI Thinking",
+            placeholder="Processing logs will appear here...",
+            lines=10,
+            max_lines=15,
+            interactive=False,
+            show_copy_button=True
+        )
+    
+    # Feature descriptions in horizontal columns below the table
+    gr.Markdown("## Key Features")
+    with gr.Row():
+        with gr.Column():
+            gr.Markdown("""
+            **📥 Input Options:**
+            • Text Input: Paste any text paragraph
+            • URL Input: Extract from web pages
+            • File Upload: Multiple formats supported
+            • Large Content: 300MB+ handling
+            """)
+        with gr.Column():
+            gr.Markdown("""
+            **🎨 Visualization:**
+            • Real-time graph updates
+            • Color-coded entity types
+            • SVG output with legend
+            • Progress tracking
+            """)
+        with gr.Column():
+            gr.Markdown("""
+            **💾 Storage & Output:**
+            • Neo4j graph database
+            • Qdrant vector storage
+            • JSON knowledge graph
+            • Incremental SVG files
+            """)
+    
+    # Supported file types in horizontal layout
+    gr.Markdown("## Supported File Types")
+    with gr.Row():
+        with gr.Column():
+            gr.Markdown("📄 **Text Files:** .txt, .md")
+        with gr.Column():
+            gr.Markdown("📊 **Data Files:** .json, .csv")
+        with gr.Column():
+            gr.Markdown("🌐 **Web Files:** .html, .htm")
+        with gr.Column():
+            gr.Markdown("📖 **Documents:** .pdf, .docx, .doc")
+    
+    # Configuration details
+    gr.Markdown("## Current Configuration")
+    with gr.Row():
+        with gr.Column():
+            gr.Markdown(f"""
+            **Model Setup:**
+            • Provider: {MODEL_PROVIDER}
+            • Model: {DEFAULT_MODEL}
+            • Chunk Size: {CHUNK_SIZE:,} chars
+            """)
+        with gr.Column():
+            gr.Markdown(f"""
+            **Processing:**
+            • Chunk Overlap: {CHUNK_OVERLAP} chars
+            • Max Chunks: {"Unlimited" if MAX_CHUNKS == 0 else str(MAX_CHUNKS)}
+            • Graph Viz: {"✅ Available" if GRAPH_VIZ_AVAILABLE else "❌ Install matplotlib & networkx"}
+            """)
+        with gr.Column():
+            gr.Markdown(f"""
+            **Integration:**
+            • Ollama: {OLLAMA_BASE_URL}
+            • LM Studio: {LMSTUDIO_BASE_URL}
+            • Embeddings: {EMBEDDING_PROVIDER}:{EMBEDDING_MODEL_NAME}
+            • MCP: {"✅ Available" if MCP_AVAILABLE else "❌ Not Available"}
+            """)
+    
+    # Examples
+    gr.Markdown("## Examples")
+    examples = gr.Examples(
+        examples=[
+            ["Apple Inc. was founded by Steve Jobs, Steve Wozniak, and Ronald Wayne in 1976. The company is headquartered in Cupertino, California.", None, "ollama", DEFAULT_MODEL, "", ""],
+            ["https://en.wikipedia.org/wiki/Artificial_intelligence", None, "ollama", DEFAULT_MODEL, "", ""],
+        ],
+        inputs=[text_input, file_input, provider_radio, model_dropdown, api_url_input, api_key_input],
+        outputs=[json_output, viz_output, progress_output],
+        fn=process_with_config,
+        cache_examples=False
+    )
+    
+    # Event handlers
+    provider_radio.change(
+        fn=toggle_api_fields,
+        inputs=[provider_radio],
+        outputs=[api_url_input, api_key_input]
+    )
+    
+    def refresh_models(provider, api_url, api_key):
+        """Refresh the model dropdown based on current configuration."""
+        return update_model_dropdown(provider, api_url, api_key)
+    
+    # Update models when provider changes
+    provider_radio.change(
+        fn=refresh_models,
+        inputs=[provider_radio, api_url_input, api_key_input],
+        outputs=[model_dropdown]
+    )
+    
+    # Update models when URL changes (for Ollama/LM Studio)
+    api_url_input.change(
+        fn=refresh_models,
+        inputs=[provider_radio, api_url_input, api_key_input],
+        outputs=[model_dropdown]
+    )
+    
+    # Refresh models button
+    refresh_models_btn.click(
+        fn=refresh_models,
+        inputs=[provider_radio, api_url_input, api_key_input],
+        outputs=[model_dropdown]
+    )
+    
+    # Wire up the submit button with configuration
+    submit_btn.click(
+        fn=process_with_config,
+        inputs=[text_input, file_input, provider_radio, model_dropdown, api_url_input, api_key_input],
+        outputs=[json_output, viz_output, progress_output]
+    )
 
 if __name__ == "__main__":
     print(f"🚀 Starting Knowledge Graph Builder with Real-Time Visualization")
@@ -1107,4 +2027,4 @@ if __name__ == "__main__":
         print("✅ Real-time SVG visualization enabled!")
         print("📁 SVG files will be saved in current directory")
     
-    demo.launch(mcp_server=True)
+    demo.launch(mcp_server=True, share=True)

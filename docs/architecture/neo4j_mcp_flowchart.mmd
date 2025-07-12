@@ -1,0 +1,16 @@
+```mermaid
+flowchart TD
+    A[Module Start] --> B[Server Initialization]
+    B --> C[Handle List Tools Request]
+    B --> D[Handle Call Tool Request]
+    D --> E[Switch Case for Tool]
+    E -- create_entities --> F[Create Entities]
+    E -- create_relations --> G[Create Relations]
+    E -- add_observations --> H[Add Observations]
+    E -- delete_entities --> I[Delete Entities]
+    E -- delete_observations --> J[Delete Observations]
+    E -- delete_relations --> K[Delete Relations]
+    E -- read_graph --> L[Read Graph]
+    E -- search_nodes --> M[Search Nodes]
+    E -- open_nodes --> N[Open Nodes]
+```

@@ -38,24 +38,21 @@ pip install networkx matplotlib
 
 ### Environment Variables
 
-Set up your local model configuration:
+For detailed configuration instructions and complete environment variables reference, see the [Configuration](#🎛️-configuration) section below.
 
+**Quick Start Configuration:**
 ```bash
-# Model Provider (ollama or lmstudio)
+# Basic setup (uses sensible defaults)
 export MODEL_PROVIDER=ollama
 export LOCAL_MODEL=llama3.2:latest
 
-# Ollama Configuration
+# Optional: Custom endpoints and processing limits
 export OLLAMA_BASE_URL=http://localhost:11434
-
-# LM Studio Configuration
-export LMSTUDIO_BASE_URL=http://localhost:1234
-
-# Large Content Processing (optional)
-export CHUNK_SIZE=2000          # Characters per chunk for AI processing
-export CHUNK_OVERLAP=200        # Overlap between chunks for context
-export MAX_CHUNKS=0             # Maximum chunks to process (0 = unlimited)
+export CHUNK_SIZE=2000
+export MAX_CHUNKS=0
 ```
+
+**Note:** All environment variables are optional and have sensible defaults. The application will run without any configuration.
 
 ### Local Model Setup
 
@@ -307,26 +304,277 @@ The system returns a structured JSON knowledge graph:
 
 ## 🎛️ Configuration
 
-### Model Providers
+### Environment Variables Reference
 
-**Ollama (Default)**
-- Supports various open-source models
-- Local processing with full privacy
-- Configurable via `OLLAMA_BASE_URL`
+All configuration is handled through environment variables. The application provides sensible defaults for all settings, allowing it to run without any configuration while still offering full customization.
 
-**LM Studio**
-- GUI-based model management
-- OpenAI-compatible API
-- Configurable via `LMSTUDIO_BASE_URL`
+#### Complete Environment Variables Table
 
-### Large Content Processing
+| Variable | Type | Default | Required | Description | Example Values |
+|----------|------|---------|----------|-------------|----------------|
+| `MODEL_PROVIDER` | string | `"ollama"` | No | AI model provider to use | `"ollama"`, `"lmstudio"` |
+| `LOCAL_MODEL` | string | `"llama3.2:latest"` | No | Local model identifier | `"llama3.2:latest"`, `"mistral:7b"`, `"codellama:13b"` |
+| `OLLAMA_BASE_URL` | string | `"http://localhost:11434"` | No | Ollama API endpoint | `"http://localhost:11434"`, `"http://192.168.1.100:11434"` |
+| `LMSTUDIO_BASE_URL` | string | `"http://localhost:1234"` | No | LM Studio API endpoint | `"http://localhost:1234"`, `"http://127.0.0.1:1234"` |
+| `CHUNK_SIZE` | integer | `2000` | No | Characters per chunk for AI processing | `1000`, `2000`, `4000`, `8000` |
+| `CHUNK_OVERLAP` | integer | `200` | No | Overlap between chunks for context | `100`, `200`, `400`, `500` |
+| `MAX_CHUNKS` | integer | `0` | No | Maximum chunks to process (0=unlimited) | `0`, `100`, `1000`, `5000` |
+| `HF_TOKEN` | string | `None` | No | HuggingFace API token (legacy, unused) | `"hf_xxxxxxxxxxxx"` |
 
-- **No Size Limits**: Handles arbitrarily large content (tested up to 300MB+)
-- **Smart Chunking**: Automatically splits large content into manageable chunks
-- **Sentence Boundary Detection**: Chunks at sentence boundaries to preserve context
-- **Intelligent Merging**: Deduplicates entities and relationships across chunks
-- **Configurable Parameters**: Adjust chunk size, overlap, and limits via environment variables
-- **Progress Tracking**: Real-time progress updates for large content processing
+### Configuration Methods
+
+#### 1. Environment Variables (Recommended)
+```bash
+# Core Model Configuration
+export MODEL_PROVIDER=ollama
+export LOCAL_MODEL=llama3.2:latest
+export OLLAMA_BASE_URL=http://localhost:11434
+
+# Large Content Processing
+export CHUNK_SIZE=2000
+export CHUNK_OVERLAP=200
+export MAX_CHUNKS=0
+```
+
+#### 2. Shell Configuration (.bashrc/.zshrc)
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export MODEL_PROVIDER=ollama
+export LOCAL_MODEL=llama3.2:latest
+export OLLAMA_BASE_URL=http://localhost:11434
+export CHUNK_SIZE=2000
+export CHUNK_OVERLAP=200
+export MAX_CHUNKS=0
+```
+
+#### 3. Python Environment File (.env)
+```bash
+# Create .env file in project root
+MODEL_PROVIDER=ollama
+LOCAL_MODEL=llama3.2:latest
+OLLAMA_BASE_URL=http://localhost:11434
+LMSTUDIO_BASE_URL=http://localhost:1234
+CHUNK_SIZE=2000
+CHUNK_OVERLAP=200
+MAX_CHUNKS=0
+```
+
+### Model Provider Configuration
+
+#### Ollama Configuration (Default)
+```bash
+# Basic Ollama setup
+export MODEL_PROVIDER=ollama
+export LOCAL_MODEL=llama3.2:latest
+export OLLAMA_BASE_URL=http://localhost:11434
+
+# Alternative models
+export LOCAL_MODEL=mistral:7b          # Mistral 7B
+export LOCAL_MODEL=codellama:13b       # Code Llama 13B
+export LOCAL_MODEL=llama3.2:3b         # Llama 3.2 3B (faster)
+export LOCAL_MODEL=phi3:mini           # Phi-3 Mini (lightweight)
+
+# Remote Ollama instance
+export OLLAMA_BASE_URL=http://192.168.1.100:11434
+```
+
+#### LM Studio Configuration
+```bash
+# Basic LM Studio setup
+export MODEL_PROVIDER=lmstudio
+export LOCAL_MODEL=any-model-name      # Model name is flexible for LM Studio
+export LMSTUDIO_BASE_URL=http://localhost:1234
+
+# Custom LM Studio port
+export LMSTUDIO_BASE_URL=http://localhost:8080
+
+# Remote LM Studio instance
+export LMSTUDIO_BASE_URL=http://192.168.1.200:1234
+```
+
+### Large Content Processing Configuration
+
+#### Chunk Size Optimization
+```bash
+# Small chunks (faster processing, more chunks)
+export CHUNK_SIZE=1000
+export CHUNK_OVERLAP=100
+
+# Medium chunks (balanced performance)
+export CHUNK_SIZE=2000    # Default
+export CHUNK_OVERLAP=200  # Default
+
+# Large chunks (fewer chunks, more context)
+export CHUNK_SIZE=4000
+export CHUNK_OVERLAP=400
+
+# Very large chunks (maximum context, slower)
+export CHUNK_SIZE=8000
+export CHUNK_OVERLAP=800
+```
+
+#### Processing Limits
+```bash
+# Unlimited processing (default)
+export MAX_CHUNKS=0
+
+# Process only first 100 chunks (testing)
+export MAX_CHUNKS=100
+
+# Process first 1000 chunks (moderate datasets)
+export MAX_CHUNKS=1000
+
+# Process first 10000 chunks (large datasets)
+export MAX_CHUNKS=10000
+```
+
+### Performance Tuning Guidelines
+
+#### For Speed Optimization
+```bash
+# Smaller chunks, less overlap, limited processing
+export CHUNK_SIZE=1000
+export CHUNK_OVERLAP=50
+export MAX_CHUNKS=500
+export LOCAL_MODEL=llama3.2:3b  # Faster model
+```
+
+#### For Quality Optimization
+```bash
+# Larger chunks, more overlap, unlimited processing
+export CHUNK_SIZE=4000
+export CHUNK_OVERLAP=400
+export MAX_CHUNKS=0
+export LOCAL_MODEL=llama3.2:latest  # Full model
+```
+
+#### For Memory-Constrained Systems
+```bash
+# Balanced settings for limited resources
+export CHUNK_SIZE=1500
+export CHUNK_OVERLAP=150
+export MAX_CHUNKS=1000
+export LOCAL_MODEL=phi3:mini  # Lightweight model
+```
+
+### Configuration Validation
+
+The application performs automatic validation of configuration settings:
+
+- **Model Provider**: Validates `MODEL_PROVIDER` is either `"ollama"` or `"lmstudio"`
+- **URLs**: Validates that provider URLs are accessible
+- **Numeric Values**: Ensures `CHUNK_SIZE`, `CHUNK_OVERLAP`, and `MAX_CHUNKS` are valid integers
+- **Model Availability**: Checks if the specified model is available on the provider
+
+### Configuration Troubleshooting
+
+#### Common Issues and Solutions
+
+**1. Model Provider Not Responding**
+```bash
+# Check if Ollama is running
+curl http://localhost:11434/api/version
+
+# Check if LM Studio is running
+curl http://localhost:1234/v1/models
+
+# Solution: Start the appropriate service
+ollama serve  # For Ollama
+# Or start LM Studio GUI and enable local server
+```
+
+**2. Model Not Found**
+```bash
+# List available Ollama models
+ollama list
+
+# Pull missing model
+ollama pull llama3.2:latest
+
+# For LM Studio: Load model in GUI
+```
+
+**3. Memory Issues with Large Content**
+```bash
+# Reduce chunk size and set limits
+export CHUNK_SIZE=1000
+export MAX_CHUNKS=100
+
+# Use lighter model
+export LOCAL_MODEL=llama3.2:3b
+```
+
+**4. Slow Processing**
+```bash
+# Optimize for speed
+export CHUNK_SIZE=1500
+export CHUNK_OVERLAP=100
+export MAX_CHUNKS=500
+export LOCAL_MODEL=phi3:mini
+```
+
+### Example Configuration Scenarios
+
+#### Scenario 1: Development Setup
+```bash
+# Fast iteration, limited processing
+export MODEL_PROVIDER=ollama
+export LOCAL_MODEL=llama3.2:3b
+export CHUNK_SIZE=1000
+export CHUNK_OVERLAP=100
+export MAX_CHUNKS=50
+```
+
+#### Scenario 2: Production Setup
+```bash
+# High quality, unlimited processing
+export MODEL_PROVIDER=ollama
+export LOCAL_MODEL=llama3.2:latest
+export CHUNK_SIZE=3000
+export CHUNK_OVERLAP=300
+export MAX_CHUNKS=0
+```
+
+#### Scenario 3: Large Dataset Processing
+```bash
+# Optimized for 300MB+ files
+export MODEL_PROVIDER=ollama
+export LOCAL_MODEL=llama3.2:latest
+export CHUNK_SIZE=2000
+export CHUNK_OVERLAP=200
+export MAX_CHUNKS=0
+```
+
+#### Scenario 4: Resource-Constrained Environment
+```bash
+# Minimal resource usage
+export MODEL_PROVIDER=ollama
+export LOCAL_MODEL=phi3:mini
+export CHUNK_SIZE=800
+export CHUNK_OVERLAP=50
+export MAX_CHUNKS=200
+```
+
+### Advanced Configuration
+
+#### Custom Model Endpoints
+```bash
+# Docker-based Ollama
+export OLLAMA_BASE_URL=http://ollama-container:11434
+
+# Kubernetes service
+export OLLAMA_BASE_URL=http://ollama-service.default.svc.cluster.local:11434
+
+# Load balancer
+export OLLAMA_BASE_URL=http://ollama-lb.example.com:11434
+```
+
+#### Dynamic Configuration
+The application reads environment variables at startup. To change configuration:
+
+1. Set new environment variables
+2. Restart the application
+3. Configuration changes take effect immediately
 
 ### Error Handling
 
@@ -336,6 +584,9 @@ Comprehensive error handling for:
 - JSON parsing errors from LLM responses
 - Malformed or empty inputs
 - Database connection issues
+- Invalid configuration values
+- Model provider connectivity issues
+- Memory constraints during large content processing
 
 ## 🔍 hKG MCP Integration with Visual Lineage
 

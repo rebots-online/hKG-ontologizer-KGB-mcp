@@ -1,0 +1,6 @@
+.env
+.gradio/certificate.pem
+__pycache__/app.cpython-310.pyc
+__pycache__/app.cpython-312.pyc
+__pycache__/app.cpython-310.pyc
+CHECKLIST--.md
